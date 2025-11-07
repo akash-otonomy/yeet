@@ -78,6 +78,23 @@ fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
     }
 }
 
+// Helper to format bytes into human-readable size
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 // Run server + cloudflared in daemon mode (called from forked child)
 fn run_daemon_server(file_path: PathBuf, port: u16) {
     use std::process;
@@ -89,38 +106,347 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
         use axum::response::Response;
         use axum::body::Body;
         use axum::http::{header, StatusCode};
+        use tower_http::services::ServeDir;
 
-        let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
-        let serve_path = format!("/{}", filename);
-        let file_path_clone = file_path.clone();
+        let is_dir = file_path.is_dir();
 
-        // Handler that serves the file
-        let serve_file = move || {
-            let path = file_path_clone.clone();
-            async move {
-                match tokio::fs::read(&path).await {
-                    Ok(contents) => {
-                        Response::builder()
-                            .status(StatusCode::OK)
-                            .header(header::CONTENT_TYPE, "application/octet-stream")
-                            .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"",
-                                path.file_name().unwrap().to_string_lossy()))
-                            .body(Body::from(contents))
-                            .unwrap()
+        let app = if is_dir {
+            // Serve directory with sick retro UI
+            let dir_path = file_path.clone();
+            let index_handler = move |req: axum::extract::Request| {
+                let base_path = dir_path.clone();
+                async move {
+                    use std::path::Path;
+
+                    // Get path from URI
+                    let req_path = req.uri().path();
+
+                    // Construct full path
+                    let full_path = if req_path.is_empty() || req_path == "/" {
+                        base_path.clone()
+                    } else {
+                        base_path.join(req_path.trim_start_matches('/'))
+                    };
+
+                    // If it's a file, serve it
+                    if full_path.is_file() {
+                        match tokio::fs::read(&full_path).await {
+                            Ok(contents) => {
+                                return Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                                    .header(header::CONTENT_DISPOSITION,
+                                        format!("attachment; filename=\"{}\"",
+                                            full_path.file_name().unwrap().to_string_lossy()))
+                                    .body(Body::from(contents))
+                                    .unwrap();
+                            }
+                            Err(_) => {
+                                return Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::from("File not found"))
+                                    .unwrap();
+                            }
+                        }
                     }
-                    Err(_) => {
-                        Response::builder()
+
+                    // If not a directory, 404
+                    if !full_path.is_dir() {
+                        return Response::builder()
                             .status(StatusCode::NOT_FOUND)
-                            .body(Body::from("File not found"))
-                            .unwrap()
+                            .body(Body::from("Not found"))
+                            .unwrap();
+                    }
+
+                    let path = full_path;
+                    let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let current_path = req_path.to_string();
+                    let mut files = Vec::new();
+
+                    if let Ok(entries) = std::fs::read_dir(&path) {
+                        for entry in entries.flatten() {
+                            if let (Ok(name), Ok(metadata)) = (entry.file_name().into_string(), entry.metadata()) {
+                                let size = metadata.len();
+                                let is_file = metadata.is_file();
+                                files.push((name, size, is_file));
+                            }
+                        }
+                    }
+
+                    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    let mut file_list = String::new();
+                    for (name, size, is_file) in files {
+                        let icon = if is_file { "📄" } else { "📁" };
+                        let size_str = if is_file {
+                            format_bytes(size)
+                        } else {
+                            "-".to_string()
+                        };
+                        // Build absolute path for links
+                        let link_path = if current_path == "/" || current_path.is_empty() {
+                            format!("/{}", name)
+                        } else {
+                            format!("{}/{}", current_path.trim_end_matches('/'), name)
+                        };
+                        file_list.push_str(&format!(
+                            r#"{{ name: '{}', path: '{}', size: '{}', sizeBytes: {}, icon: '{}', isFile: {} }},"#,
+                            name.replace("'", "\\'"), link_path.replace("'", "\\'"), size_str, size, icon, is_file
+                        ));
+                    }
+
+                    let html = format!(r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YEET // {}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            background: #0a0e27;
+            color: #00ff9f;
+            font-family: 'Roboto Mono', monospace;
+            padding: 2rem;
+            min-height: 100vh;
+        }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .header {{
+            border: 2px solid #00ff9f;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            background: rgba(0, 255, 159, 0.05);
+        }}
+        .logo {{
+            font-size: 2rem;
+            font-weight: bold;
+            color: #00d4ff;
+            text-shadow: 0 0 10px #00d4ff;
+            margin-bottom: 0.5rem;
+        }}
+        .subtitle {{
+            color: #ff00ff;
+            font-size: 0.9rem;
+        }}
+        .controls {{
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }}
+        input, select {{
+            background: #1a1f3a;
+            border: 1px solid #00ff9f;
+            color: #00ff9f;
+            padding: 0.5rem 1rem;
+            font-family: 'Roboto Mono', monospace;
+            font-size: 0.9rem;
+        }}
+        input:focus, select:focus {{
+            outline: none;
+            box-shadow: 0 0 10px rgba(0, 255, 159, 0.5);
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            border: 2px solid #00ff9f;
+        }}
+        th {{
+            background: rgba(0, 255, 159, 0.1);
+            padding: 1rem;
+            text-align: left;
+            border-bottom: 2px solid #00ff9f;
+            cursor: pointer;
+            user-select: none;
+            color: #00d4ff;
+        }}
+        th:hover {{
+            background: rgba(0, 255, 159, 0.2);
+        }}
+        td {{
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid rgba(0, 255, 159, 0.2);
+        }}
+        tr:hover {{
+            background: rgba(0, 255, 159, 0.05);
+        }}
+        a {{
+            color: #00ff9f;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }}
+        a:hover {{
+            color: #00d4ff;
+            text-shadow: 0 0 5px #00d4ff;
+        }}
+        .icon {{ font-size: 1.2rem; }}
+        .stats {{
+            margin-top: 1rem;
+            padding: 1rem;
+            border: 1px solid rgba(255, 0, 255, 0.3);
+            background: rgba(255, 0, 255, 0.05);
+            color: #ff00ff;
+            font-size: 0.85rem;
+        }}
+        .sort-indicator {{
+            font-size: 0.7rem;
+            margin-left: 0.5rem;
+            color: #ff00ff;
+        }}
+    </style>
+</head>
+<body x-data="fileManager()">
+    <div class="container">
+        <div class="header">
+            <div class="logo">█ YEET.SH █</div>
+            <div class="subtitle">// {}</div>
+        </div>
+
+        <div class="controls">
+            <input
+                type="text"
+                x-model="search"
+                placeholder="⚡ SEARCH FILES..."
+                style="flex: 1; min-width: 200px;">
+            <select x-model="filter">
+                <option value="all">ALL FILES</option>
+                <option value="files">FILES ONLY</option>
+                <option value="dirs">DIRS ONLY</option>
+            </select>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th @click="sortBy('name')" style="width: 50%">
+                        NAME
+                        <span class="sort-indicator" x-show="sortKey === 'name'" x-text="sortAsc ? '▲' : '▼'"></span>
+                    </th>
+                    <th @click="sortBy('size')" style="width: 30%">
+                        SIZE
+                        <span class="sort-indicator" x-show="sortKey === 'size'" x-text="sortAsc ? '▲' : '▼'"></span>
+                    </th>
+                    <th style="width: 20%">TYPE</th>
+                </tr>
+            </thead>
+            <tbody>
+                <template x-for="file in filteredFiles" :key="file.name">
+                    <tr>
+                        <td>
+                            <a :href="file.path">
+                                <span class="icon" x-text="file.icon"></span>
+                                <span x-text="file.name"></span>
+                            </a>
+                        </td>
+                        <td x-text="file.size"></td>
+                        <td x-text="file.isFile ? 'FILE' : 'DIR'"></td>
+                    </tr>
+                </template>
+            </tbody>
+        </table>
+
+        <div class="stats">
+            <span x-text="stats"></span>
+        </div>
+    </div>
+
+    <script>
+        function fileManager() {{
+            return {{
+                files: [{}],
+                search: '',
+                filter: 'all',
+                sortKey: 'name',
+                sortAsc: true,
+
+                sortBy(key) {{
+                    if (this.sortKey === key) {{
+                        this.sortAsc = !this.sortAsc;
+                    }} else {{
+                        this.sortKey = key;
+                        this.sortAsc = true;
+                    }}
+                }},
+
+                get filteredFiles() {{
+                    let filtered = this.files.filter(f => {{
+                        if (this.search && !f.name.toLowerCase().includes(this.search.toLowerCase())) return false;
+                        if (this.filter === 'files' && !f.isFile) return false;
+                        if (this.filter === 'dirs' && f.isFile) return false;
+                        return true;
+                    }});
+
+                    filtered.sort((a, b) => {{
+                        let aVal = this.sortKey === 'size' ? a.sizeBytes : a.name.toLowerCase();
+                        let bVal = this.sortKey === 'size' ? b.sizeBytes : b.name.toLowerCase();
+                        return this.sortAsc ?
+                            (aVal < bVal ? -1 : 1) :
+                            (aVal > bVal ? -1 : 1);
+                    }});
+
+                    return filtered;
+                }},
+
+                get stats() {{
+                    let total = this.filteredFiles.length;
+                    let files = this.filteredFiles.filter(f => f.isFile).length;
+                    let dirs = total - files;
+                    return `▸ SHOWING ${{total}} ITEMS // ${{files}} FILES // ${{dirs}} DIRECTORIES`;
+                }}
+            }}
+        }}
+    </script>
+</body>
+</html>"#, dir_name, dir_name, file_list);
+
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                        .body(Body::from(html))
+                        .unwrap()
+                }
+            };
+
+            Router::new()
+                .fallback(index_handler)
+        } else {
+            // Serve single file
+            let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
+            let serve_path = format!("/{}", filename);
+            let file_path_clone = file_path.clone();
+
+            // Handler that serves the file
+            let serve_file = move || {
+                let path = file_path_clone.clone();
+                async move {
+                    match tokio::fs::read(&path).await {
+                        Ok(contents) => {
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, "application/octet-stream")
+                                .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"",
+                                    path.file_name().unwrap().to_string_lossy()))
+                                .body(Body::from(contents))
+                                .unwrap()
+                        }
+                        Err(_) => {
+                            Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::from("File not found"))
+                                .unwrap()
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        let app = Router::new()
-            .route(&serve_path, axum::routing::get(serve_file.clone()))
-            .route("/", axum::routing::get(serve_file));
+            Router::new()
+                .route(&serve_path, axum::routing::get(serve_file.clone()))
+                .route("/", axum::routing::get(serve_file))
+        };
 
         let addr = format!("127.0.0.1:{}", port);
         let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind");
@@ -134,14 +460,14 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Start cloudflared
-        start_cloudflared_daemon(file_path, port, daemon_pid).await;
+        start_cloudflared_daemon(file_path, port, daemon_pid, is_dir).await;
 
         // Keep daemon alive
         server_handle.await.ok();
     });
 }
 
-async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32) {
+async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32, is_dir: bool) {
     use std::io::{BufRead, BufReader};
 
     let mut tunnel = Command::new("cloudflared")
@@ -152,8 +478,6 @@ async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32
         .expect("Failed to start cloudflared");
 
     if let Some(stderr) = tunnel.stderr.take() {
-        let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
-
         let reader = BufReader::new(stderr);
         let mut url_saved = false;
 
@@ -164,7 +488,14 @@ async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32
                     let re = Regex::new(r"https://[^\s]+\.trycloudflare\.com").unwrap();
                     if let Some(mat) = re.find(&line) {
                         let base_url = mat.as_str();
-                        let url = format!("{}/{}", base_url, filename);
+
+                        // For directories, use base URL; for files, append filename
+                        let url = if is_dir {
+                            base_url.to_string()
+                        } else {
+                            let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
+                            format!("{}/{}", base_url, filename)
+                        };
 
                         // Save state
                         use std::time::{SystemTime, UNIX_EPOCH};
@@ -261,9 +592,9 @@ impl TunnelState {
 
 #[derive(Parser)]
 #[command(name = "yeet")]
-#[command(about = "🚀 Yeet files across the internet at warp speed", long_about = None)]
+#[command(about = "🚀 Yeet files and directories across the internet at warp speed", long_about = None)]
 struct Cli {
-    /// File to yeet
+    /// File or directory to yeet
     file: Option<PathBuf>,
 
     /// Port for HTTP server (default: 8000)
@@ -339,6 +670,7 @@ impl DownloadMetrics {
 struct App {
     file_path: PathBuf,
     file_size: u64,
+    is_dir: bool,
     port: u16,
     tunnel_url: Option<String>,
     frame_count: u32,
@@ -348,7 +680,9 @@ struct App {
 
 impl App {
     fn new(file_path: PathBuf, port: u16) -> Result<Self> {
-        let file_size = std::fs::metadata(&file_path)?.len();
+        let metadata = std::fs::metadata(&file_path)?;
+        let is_dir = metadata.is_dir();
+        let file_size = if is_dir { 0 } else { metadata.len() };
 
         // Load initial state from daemon
         let (tunnel_url, daemon_pid, daemon_age) = if let Some(state) = TunnelState::load() {
@@ -361,6 +695,7 @@ impl App {
         Ok(Self {
             file_path,
             file_size,
+            is_dir,
             port,
             tunnel_url,
             frame_count: 0,
@@ -424,18 +759,23 @@ fn ui(f: &mut Frame, app: &App) {
     // Info box
     let mut info_lines = vec![
         Line::from(vec![
-            Span::styled("FILE: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(if app.is_dir { "DIR: " } else { "FILE: " },
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
             Span::raw(app.file_path.file_name().unwrap().to_string_lossy()),
         ]),
-        Line::from(vec![
+    ];
+
+    if !app.is_dir {
+        info_lines.push(Line::from(vec![
             Span::styled("SIZE: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
             Span::raw(app.format_size()),
-        ]),
-        Line::from(vec![
-            Span::styled("PORT: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw(format!("{}", app.port)),
-        ]),
-    ];
+        ]));
+    }
+
+    info_lines.push(Line::from(vec![
+        Span::styled("PORT: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("{}", app.port)),
+    ]));
 
     if let Some(pid) = app.daemon_pid {
         info_lines.push(Line::from(vec![
@@ -586,12 +926,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Require file for normal operation
-    let file = cli.file.ok_or_else(|| anyhow::anyhow!("File path required (or use --status/--kill)"))?;
+    // Require file/directory for normal operation
+    let file = cli.file.ok_or_else(|| anyhow::anyhow!("File or directory path required (or use --status/--kill)"))?;
 
-    // Validate file exists
+    // Validate path exists
     if !file.exists() {
-        anyhow::bail!("File not found: {}", file.display());
+        anyhow::bail!("Path not found: {}", file.display());
     }
 
     // Check for existing tunnel
