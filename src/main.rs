@@ -1,3 +1,8 @@
+// 🎮 Module declarations - TUI and Shared types
+mod tui;
+mod web;
+mod shared;
+
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
@@ -16,11 +21,7 @@ use ratatui::{
 use std::{
     io,
     path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
-    },
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
     fs,
@@ -29,13 +30,6 @@ use tokio::runtime::Runtime;
 use axum::Router;
 use serde::{Serialize, Deserialize};
 use nix::unistd::{fork, ForkResult, setsid};
-
-const YEET_LOGO: &str = r#"
-█  █ ███ ███ ███   ███ █ █
- ██  █   █    █  █ █   █▀█
-  █  ███ ███  █  █ ███ █ █
->> yeet stuff across the internet
-"#;
 
 // Spawn a daemon process that runs server + cloudflared
 fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
@@ -95,6 +89,302 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+// API Handler: /api/stats - Returns server statistics
+async fn api_stats_handler() -> axum::Json<shared::ServerStats> {
+    use axum::Json;
+    // TODO: Replace with real stats tracking
+    Json(shared::ServerStats {
+        uptime_secs: 3600,
+        total_requests: 42,
+        total_bytes_sent: 5_000_000,
+        current_speed_bps: 1_200_000,
+        active_connections: 2,
+        unique_ips: 7,
+        requests_per_minute: 15,
+    })
+}
+
+// API Handler: /api/logs - Returns recent request logs
+async fn api_logs_handler() -> axum::Json<Vec<shared::RequestLog>> {
+    use axum::Json;
+    // TODO: Replace with real log tracking
+    Json(vec![
+        shared::RequestLog {
+            timestamp: 1234567890,
+            method: "GET".to_string(),
+            path: "/cat.jpg".to_string(),
+            status: 200,
+            size_bytes: 2_400_000,
+            user_agent: "Chrome".to_string(),
+            ip: "192.168.1.5".to_string(),
+        },
+        shared::RequestLog {
+            timestamp: 1234567888,
+            method: "GET".to_string(),
+            path: "/cat.jpg".to_string(),
+            status: 200,
+            size_bytes: 2_400_000,
+            user_agent: "Safari".to_string(),
+            ip: "10.0.1.23".to_string(),
+        },
+    ])
+}
+
+// Admin Dashboard Handler: /admin - Retro-styled stats dashboard
+async fn admin_handler() -> axum::response::Html<String> {
+    use axum::response::Html;
+    Html(r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YEET.SH // ADMIN DASHBOARD</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #14141E;
+            color: #C0C0C0;
+            font-family: 'Roboto Mono', monospace;
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+            padding: 2rem;
+            border: 3px solid #00FFFF;
+            background: rgba(0, 255, 255, 0.05);
+            position: relative;
+        }
+        .logo {
+            font-size: 3rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #FF00FF 0%, #00FFFF 25%, #FFFF00 50%, #00FF9F 75%, #FF00FF 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            text-shadow: 0 0 30px rgba(255, 0, 255, 0.5);
+            margin-bottom: 0.5rem;
+            animation: glow 2s infinite;
+        }
+        @keyframes glow {
+            0%, 100% { filter: brightness(1); }
+            50% { filter: brightness(1.3); }
+        }
+        .subtitle {
+            color: #808080;
+            font-size: 1rem;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 3rem;
+        }
+        .stat-card {
+            border: 2px solid;
+            padding: 1.5rem;
+            background: rgba(255, 255, 255, 0.03);
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: currentColor;
+            animation: scan 2s infinite;
+        }
+        @keyframes scan {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+        }
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 255, 255, 0.3);
+        }
+        .stat-label {
+            font-size: 0.8rem;
+            margin-bottom: 0.5rem;
+            opacity: 0.8;
+        }
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        .logs-section {
+            border: 2px solid #808080;
+            padding: 2rem;
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .logs-header {
+            color: #00FFFF;
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .log-entry {
+            display: grid;
+            grid-template-columns: 80px 60px 1fr 60px 100px 150px 120px;
+            gap: 1rem;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.85rem;
+        }
+        .log-header {
+            font-weight: bold;
+            color: #00D4FF;
+        }
+        .status-200 { color: #00FF9F; }
+        .status-300 { color: #FFFF00; }
+        .status-400 { color: #FF8000; }
+    </style>
+</head>
+<body x-data="dashboard()" x-init="init()">
+    <div class="container">
+        <div class="header">
+            <div class="logo">██ YEET.SH ██</div>
+            <div class="subtitle">🚀 ADMIN DASHBOARD // REAL-TIME SERVER METRICS</div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card" style="border-color: #00FFFF; color: #00FFFF;">
+                <div class="stat-label">UPTIME</div>
+                <div class="stat-value" x-text="stats.uptime"></div>
+            </div>
+            <div class="stat-card" style="border-color: #FF00FF; color: #FF00FF;">
+                <div class="stat-label">REQUESTS</div>
+                <div class="stat-value" x-text="stats.total_requests"></div>
+            </div>
+            <div class="stat-card" style="border-color: #FFFF00; color: #FFFF00;">
+                <div class="stat-label">BANDWIDTH</div>
+                <div class="stat-value" x-text="stats.bandwidth"></div>
+            </div>
+            <div class="stat-card" style="border-color: #00FF9F; color: #00FF9F;">
+                <div class="stat-label">SPEED</div>
+                <div class="stat-value" x-text="stats.speed"></div>
+            </div>
+            <div class="stat-card" style="border-color: #FF8000; color: #FF8000;">
+                <div class="stat-label">CONNECTIONS</div>
+                <div class="stat-value" x-text="stats.active_connections"></div>
+            </div>
+            <div class="stat-card" style="border-color: #00D4FF; color: #00D4FF;">
+                <div class="stat-label">UNIQUE IPs</div>
+                <div class="stat-value" x-text="stats.unique_ips"></div>
+            </div>
+            <div class="stat-card" style="border-color: #C0C0C0; color: #C0C0C0;">
+                <div class="stat-label">REQ/MIN</div>
+                <div class="stat-value" x-text="stats.requests_per_minute"></div>
+            </div>
+        </div>
+
+        <div class="logs-section">
+            <div class="logs-header">📡 LIVE REQUEST LOG</div>
+            <div class="log-entry log-header">
+                <div>TIME</div>
+                <div>METHOD</div>
+                <div>PATH</div>
+                <div>STATUS</div>
+                <div>SIZE</div>
+                <div>USER AGENT</div>
+                <div>IP</div>
+            </div>
+            <template x-for="log in logs" :key="log.timestamp">
+                <div class="log-entry">
+                    <div style="color: #808080;" x-text="formatTime(log.timestamp)"></div>
+                    <div style="color: #00FFFF;" x-text="log.method"></div>
+                    <div style="color: #C0C0C0;" x-text="log.path"></div>
+                    <div :class="'status-' + Math.floor(log.status/100) + '00'" x-text="log.status"></div>
+                    <div style="color: #FFFF00;" x-text="formatBytes(log.size_bytes)"></div>
+                    <div style="color: #FF00FF;" x-text="log.user_agent"></div>
+                    <div style="color: #808080;" x-text="log.ip"></div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <script>
+        function dashboard() {
+            return {
+                stats: {
+                    uptime: '-',
+                    total_requests: '-',
+                    bandwidth: '-',
+                    speed: '-',
+                    active_connections: '-',
+                    unique_ips: '-',
+                    requests_per_minute: '-'
+                },
+                logs: [],
+
+                async init() {
+                    await this.fetchStats();
+                    await this.fetchLogs();
+                    // Refresh every 3 seconds
+                    setInterval(() => this.fetchStats(), 3000);
+                    setInterval(() => this.fetchLogs(), 3000);
+                },
+
+                async fetchStats() {
+                    try {
+                        const res = await fetch('/api/stats');
+                        const data = await res.json();
+                        this.stats = {
+                            uptime: this.formatUptime(data.uptime_secs),
+                            total_requests: data.total_requests.toLocaleString(),
+                            bandwidth: this.formatBytes(data.total_bytes_sent),
+                            speed: this.formatBytes(data.current_speed_bps) + '/s',
+                            active_connections: data.active_connections,
+                            unique_ips: data.unique_ips,
+                            requests_per_minute: data.requests_per_minute
+                        };
+                    } catch (e) {
+                        console.error('Failed to fetch stats:', e);
+                    }
+                },
+
+                async fetchLogs() {
+                    try {
+                        const res = await fetch('/api/logs');
+                        this.logs = await res.json();
+                    } catch (e) {
+                        console.error('Failed to fetch logs:', e);
+                    }
+                },
+
+                formatUptime(secs) {
+                    const h = Math.floor(secs / 3600);
+                    const m = Math.floor((secs % 3600) / 60);
+                    return `${h}h ${m}m`;
+                },
+
+                formatBytes(bytes) {
+                    if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
+                    if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
+                    if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + ' KB';
+                    return bytes + ' B';
+                },
+
+                formatTime(timestamp) {
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleTimeString('en-US', { hour12: false });
+                }
+            };
+        }
+    </script>
+</body>
+</html>"#.to_string())
+}
+
 // Run server + cloudflared in daemon mode (called from forked child)
 fn run_daemon_server(file_path: PathBuf, port: u16) {
     use std::process;
@@ -106,7 +396,6 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
         use axum::response::Response;
         use axum::body::Body;
         use axum::http::{header, StatusCode};
-        use tower_http::services::ServeDir;
 
         let is_dir = file_path.is_dir();
 
@@ -116,8 +405,6 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
             let index_handler = move |req: axum::extract::Request| {
                 let base_path = dir_path.clone();
                 async move {
-                    use std::path::Path;
-
                     // Get path from URI
                     let req_path = req.uri().path();
 
@@ -412,6 +699,9 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
             };
 
             Router::new()
+                .route("/api/stats", axum::routing::get(api_stats_handler))
+                .route("/api/logs", axum::routing::get(api_logs_handler))
+                .route("/admin", axum::routing::get(admin_handler))
                 .fallback(index_handler)
         } else {
             // Serve single file
@@ -444,6 +734,9 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
             };
 
             Router::new()
+                .route("/api/stats", axum::routing::get(api_stats_handler))
+                .route("/api/logs", axum::routing::get(api_logs_handler))
+                .route("/admin", axum::routing::get(admin_handler))
                 .route(&serve_path, axum::routing::get(serve_file.clone()))
                 .route("/", axum::routing::get(serve_file))
         };
@@ -453,7 +746,7 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
 
         // Start server in background
         let server_handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("Server failed");
+            axum::serve(listener, app.into_make_service()).await.expect("Server failed");
         });
 
         // Wait a bit for server to start
@@ -614,59 +907,6 @@ struct Cli {
     kill: bool,
 }
 
-#[derive(Clone)]
-struct DownloadMetrics {
-    downloads: Arc<AtomicU64>,
-    bytes_sent: Arc<AtomicU64>,
-    last_download_time: Arc<Mutex<Option<Instant>>>,
-    active_downloads: Arc<AtomicU64>,
-}
-
-impl DownloadMetrics {
-    fn new() -> Self {
-        Self {
-            downloads: Arc::new(AtomicU64::new(0)),
-            bytes_sent: Arc::new(AtomicU64::new(0)),
-            last_download_time: Arc::new(Mutex::new(None)),
-            active_downloads: Arc::new(AtomicU64::new(0)),
-        }
-    }
-
-    fn start_download(&self) {
-        self.downloads.fetch_add(1, Ordering::Relaxed);
-        self.active_downloads.fetch_add(1, Ordering::Relaxed);
-        *self.last_download_time.lock().unwrap() = Some(Instant::now());
-    }
-
-    fn finish_download(&self) {
-        self.active_downloads.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn add_bytes(&self, bytes: u64) {
-        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    fn get_stats(&self) -> (u64, u64, u64, Option<f64>) {
-        let downloads = self.downloads.load(Ordering::Relaxed);
-        let bytes = self.bytes_sent.load(Ordering::Relaxed);
-        let active = self.active_downloads.load(Ordering::Relaxed);
-
-        let speed = if let Some(start) = *self.last_download_time.lock().unwrap() {
-            let elapsed = start.elapsed().as_secs_f64();
-            if elapsed > 0.1 && bytes > 0 {
-                // Calculate average speed across all downloads
-                Some(bytes as f64 / elapsed / 1024.0 / 1024.0) // MB/s
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        (downloads, bytes, active, speed)
-    }
-}
-
 struct App {
     file_path: PathBuf,
     file_size: u64,
@@ -676,6 +916,7 @@ struct App {
     frame_count: u32,
     daemon_pid: Option<u32>,
     daemon_age: Option<f64>,
+    yeet_tui: tui::YeetTui,  // 🎮 Retro TUI renderer
 }
 
 impl App {
@@ -701,6 +942,7 @@ impl App {
             frame_count: 0,
             daemon_pid,
             daemon_age,
+            yeet_tui: tui::YeetTui::new(),  // 🎮 Initialize retro TUI
         })
     }
 
@@ -716,6 +958,7 @@ impl App {
 
     fn tick(&mut self) {
         self.frame_count = self.frame_count.wrapping_add(1);
+        self.yeet_tui.tick();  // 🎮 Tick retro animations
         // Refresh state from daemon every few ticks
         if self.frame_count % 30 == 0 {
             self.refresh_state();
@@ -750,11 +993,8 @@ fn ui(f: &mut Frame, app: &App) {
         ])
         .split(size);
 
-    // Render logo
-    let logo = Paragraph::new(YEET_LOGO)
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-        .alignment(Alignment::Left);
-    f.render_widget(logo, chunks[0]);
+    // 🎮 Render COLORFUL retro YEET logo
+    app.yeet_tui.render_logo(f, chunks[0]);
 
     // Info box
     let mut info_lines = vec![
@@ -788,10 +1028,10 @@ fn ui(f: &mut Frame, app: &App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .border_type(BorderType::Thick)
-                .title("▓▒INFO▒▓")
-                .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                .border_style(Style::default().fg(tui::theme::RetroTheme::CYAN))
+                .border_type(BorderType::Rounded)  // 🎮 Rounded borders
+                .title("FILE INFO")
+                .title_style(Style::default().fg(tui::theme::RetroTheme::MAGENTA).add_modifier(Modifier::BOLD)),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(info, chunks[1]);
@@ -831,10 +1071,10 @@ fn ui(f: &mut Frame, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green))
-                    .border_type(BorderType::Thick)
-                    .title("▓▒░YEETED░▒▓")
-                    .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    .border_style(Style::default().fg(tui::theme::RetroTheme::GREEN))
+                    .border_type(BorderType::Rounded)  // 🎮 Rounded borders
+                    .title("🚀 YEETED")
+                    .title_style(Style::default().fg(tui::theme::RetroTheme::YELLOW).add_modifier(Modifier::BOLD)),
             )
             .alignment(Alignment::Left);
         f.render_widget(url_panel, chunks[2]);
