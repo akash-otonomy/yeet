@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing YEET..."
+VERSION="0.1.0"
+
+echo "🚀 Installing YEET v${VERSION}..."
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -104,7 +106,7 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
 fi
 
 echo ""
-echo "✅ Installation complete!"
+echo "✅ Installation complete! YEET v${VERSION}"
 echo ""
 echo "Usage:"
 echo "  yeet <file-or-directory>     # Share a file or directory"

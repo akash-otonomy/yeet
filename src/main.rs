@@ -1201,6 +1201,7 @@ fn main() -> Result<()> {
 
         // Wait for state file to be created (max 30 seconds)
         let start = Instant::now();
+        println!("   (Press Ctrl+C to cancel)");
         while start.elapsed() < Duration::from_secs(30) {
             if let Some(state) = TunnelState::load() {
                 println!("✓ Tunnel ready!");
@@ -1211,7 +1212,14 @@ fn main() -> Result<()> {
         }
 
         if TunnelState::load().is_none() {
-            anyhow::bail!("Daemon failed to create tunnel within 30 seconds");
+            eprintln!("\n❌ Daemon failed to create tunnel within 30 seconds");
+            eprintln!("   Possible issues:");
+            eprintln!("   - cloudflared not properly installed");
+            eprintln!("   - Network restrictions (Docker containers need --network=host)");
+            eprintln!("   - Port {} already in use", cli.port);
+            eprintln!("\n   Try: yeet --kill   (to stop daemon)");
+            eprintln!("   Then: yeet <file> --port <different-port>");
+            anyhow::bail!("Tunnel creation failed");
         }
     }
 
