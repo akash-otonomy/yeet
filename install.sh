@@ -1,49 +1,116 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing YEET.SH on RunPod..."
+echo "🚀 Installing YEET..."
 
-INSTALL_DIR="${HOME}/.local/bin"
-TUNNEL="https://guided-carry-pour-lakes.trycloudflare.com"
+# Detect OS and architecture
+OS="$(uname -s)"
+ARCH="$(uname -m)"
 
-mkdir -p "$INSTALL_DIR"
+case "$OS" in
+    Linux*)
+        case "$ARCH" in
+            x86_64)
+                TARGET="x86_64-unknown-linux-gnu"
+                CLOUDFLARED_ARCH="amd64"
+                ;;
+            aarch64|arm64)
+                TARGET="aarch64-unknown-linux-gnu"
+                CLOUDFLARED_ARCH="arm64"
+                ;;
+            *)
+                echo "❌ Unsupported architecture: $ARCH"
+                exit 1
+                ;;
+        esac
+        CLOUDFLARED_OS="linux"
+        ;;
+    Darwin*)
+        case "$ARCH" in
+            x86_64)
+                TARGET="x86_64-apple-darwin"
+                ;;
+            arm64)
+                TARGET="aarch64-apple-darwin"
+                ;;
+            *)
+                echo "❌ Unsupported architecture: $ARCH"
+                exit 1
+                ;;
+        esac
+        CLOUDFLARED_OS="darwin"
+        CLOUDFLARED_ARCH="amd64"  # Cloudflare only provides amd64 for macOS (works with Rosetta)
+        ;;
+    *)
+        echo "❌ Unsupported OS: $OS"
+        exit 1
+        ;;
+esac
 
-# Install cloudflared
-if ! command -v cloudflared &> /dev/null; then
-    echo "📥 Installing cloudflared..."
-    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$INSTALL_DIR/cloudflared"
-    chmod +x "$INSTALL_DIR/cloudflared"
-fi
+echo "📦 Detected: $OS $ARCH -> $TARGET"
 
-# Install Rust if needed
-if ! command -v cargo &> /dev/null; then
-    echo "📥 Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-    source "$HOME/.cargo/env"
+# Set install directory
+if [ -w "/usr/local/bin" ]; then
+    INSTALL_DIR="/usr/local/bin"
+elif [ -d "$HOME/.local/bin" ]; then
+    INSTALL_DIR="$HOME/.local/bin"
 else
-    source "$HOME/.cargo/env" 2>/dev/null || true
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
 fi
 
-# Download source
-echo "📥 Downloading source..."
-cd /tmp && rm -rf yeet.sh
-mkdir -p yeet.sh/src/tui yeet.sh/src/web yeet.sh/src/shared yeet.sh/assets
-cd yeet.sh
+echo "📂 Installing to: $INSTALL_DIR"
 
-curl -fsSL "$TUNNEL/Cargo.toml" -o Cargo.toml
-curl -fsSL "$TUNNEL/Cargo.lock" -o Cargo.lock
-curl -fsSL "$TUNNEL/src/main.rs" -o src/main.rs
-curl -fsSL "$TUNNEL/src/tui/mod.rs" -o src/tui/mod.rs 2>/dev/null || true
-curl -fsSL "$TUNNEL/src/tui/theme.rs" -o src/tui/theme.rs 2>/dev/null || true
-curl -fsSL "$TUNNEL/src/web/mod.rs" -o src/web/mod.rs 2>/dev/null || true
-curl -fsSL "$TUNNEL/src/shared/mod.rs" -o src/shared/mod.rs 2>/dev/null || true
-curl -fsSL "$TUNNEL/assets/style.css" -o assets/style.css 2>/dev/null || true
-echo "🔨 Building yeet..."
-cargo build --release
-cp target/release/yeet "$INSTALL_DIR/yeet"
+# Download yeet binary
+YEET_URL="https://github.com/akash-otonomy/yeet/releases/latest/download/yeet-$TARGET"
+echo "⬇️  Downloading yeet..."
 
-# Add to PATH
-grep -q ".local/bin" ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-export PATH="$HOME/.local/bin:$PATH"
+if command -v curl &> /dev/null; then
+    curl -fsSL "$YEET_URL" -o "$INSTALL_DIR/yeet"
+elif command -v wget &> /dev/null; then
+    wget -q "$YEET_URL" -O "$INSTALL_DIR/yeet"
+else
+    echo "❌ Neither curl nor wget found. Please install one of them."
+    exit 1
+fi
 
-echo "✅ Done! Run: yeet /workspace/your-data"
+chmod +x "$INSTALL_DIR/yeet"
+echo "✅ yeet installed"
+
+# Check if cloudflared is already installed
+if command -v cloudflared &> /dev/null; then
+    echo "✅ cloudflared already installed"
+else
+    echo "⬇️  Installing cloudflared..."
+    CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CLOUDFLARED_OS}-${CLOUDFLARED_ARCH}"
+    
+    if command -v curl &> /dev/null; then
+        curl -fsSL "$CLOUDFLARED_URL" -o "$INSTALL_DIR/cloudflared"
+    else
+        wget -q "$CLOUDFLARED_URL" -O "$INSTALL_DIR/cloudflared"
+    fi
+    
+    chmod +x "$INSTALL_DIR/cloudflared"
+    echo "✅ cloudflared installed"
+fi
+
+# Add to PATH if needed
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo ""
+    echo "⚠️  Add $INSTALL_DIR to your PATH:"
+    echo "   export PATH=\"$INSTALL_DIR:\$PATH\""
+    echo ""
+    echo "   Add this to your ~/.bashrc or ~/.zshrc to make it permanent"
+fi
+
+echo ""
+echo "✅ Installation complete!"
+echo ""
+echo "Usage:"
+echo "  yeet <file-or-directory>     # Share a file or directory"
+echo "  yeet --status                # Check tunnel status"
+echo "  yeet --kill                  # Stop background tunnel"
+echo ""
+echo "Example:"
+echo "  yeet /path/to/file.zip"
+echo ""

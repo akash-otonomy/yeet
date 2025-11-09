@@ -16,7 +16,20 @@ Zero-config file sharing via Cloudflare tunnels with a retro TUI and web dashboa
 
 ## Installation
 
-### Quick Install (Pre-built binaries)
+### One-liner (Recommended)
+
+**macOS / Linux**
+```bash
+curl -fsSL https://raw.githubusercontent.com/akash-otonomy/yeet/master/install.sh | bash
+```
+
+This automatically:
+- ✅ Detects your OS and architecture
+- ✅ Downloads the correct binary
+- ✅ Installs cloudflared dependency
+- ✅ Sets up permissions
+
+### Manual Install (Pre-built binaries)
 
 **macOS (Apple Silicon)**
 ```bash
