@@ -31,12 +31,3 @@ pub struct FileStats {
     pub requests: u64,
     pub bytes_sent: u64,
 }
-
-/// Server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
-    pub file_path: String,
-    pub is_directory: bool,
-    pub port: u16,
-    pub tunnel_url: Option<String>,
-}
