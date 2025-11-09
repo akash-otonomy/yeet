@@ -16,14 +16,44 @@ Zero-config file sharing via Cloudflare tunnels with a retro TUI and web dashboa
 
 ## Installation
 
-### macOS/Linux (from source)
+### Quick Install (Pre-built binaries)
+
+**macOS (Apple Silicon)**
 ```bash
-cargo install --git https://github.com/akash-otonomy/yeet
+curl -L https://github.com/akash-otonomy/yeet/releases/latest/download/yeet-aarch64-apple-darwin -o yeet
+chmod +x yeet
+sudo mv yeet /usr/local/bin/
 ```
 
-### RunPod/Linux VMs (one-liner)
+**macOS (Intel)**
 ```bash
-# Coming soon - GitHub release with pre-built binaries
+curl -L https://github.com/akash-otonomy/yeet/releases/latest/download/yeet-x86_64-apple-darwin -o yeet
+chmod +x yeet
+sudo mv yeet /usr/local/bin/
+```
+
+**Linux x86_64**
+```bash
+curl -L https://github.com/akash-otonomy/yeet/releases/latest/download/yeet-x86_64-unknown-linux-gnu -o yeet
+chmod +x yeet
+sudo mv yeet /usr/local/bin/
+```
+
+**Linux ARM64 (RunPod GPU servers)**
+```bash
+curl -L https://github.com/akash-otonomy/yeet/releases/latest/download/yeet-aarch64-unknown-linux-gnu -o yeet
+chmod +x yeet
+# For RunPod, use ~/.local/bin instead
+mkdir -p ~/.local/bin
+mv yeet ~/.local/bin/
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### From Source (requires Rust)
+
+First [install Rust](https://rustup.rs/), then:
+```bash
+cargo install --git https://github.com/akash-otonomy/yeet
 ```
 
 ## Usage
