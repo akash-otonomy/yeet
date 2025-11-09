@@ -1,132 +1,100 @@
-# 🚀 yeet.sh
+# YEET 🚀
 
-> **Yeet files across the internet at warp speed**
+> Yeet files across the internet at warp speed
 
-A blazingly fast™ retro-futuristic TUI file transfer tool powered by Cloudflare tunnels.
+Zero-config file sharing via Cloudflare tunnels with a retro TUI and web dashboard.
+
+## Features
+
+- **Zero Configuration**: No account required, no config files
+- **Instant Public URLs**: Uses Cloudflare Quick Tunnels
+- **Retro TUI**: Colorful terminal interface with 8-bit aesthetic
+- **Admin Dashboard**: Real-time stats at `/admin`
+- **Daemon Mode**: Tunnel stays alive in background
+- **Directory Support**: Share entire folders with file browser
+- **One-liner Install**: Deploy to RunPod/Linux VMs instantly
+
+## Installation
+
+### macOS/Linux (from source)
+```bash
+cargo install --git https://github.com/akash-otonomy/yeet
+```
+
+### RunPod/Linux VMs (one-liner)
+```bash
+# Coming soon - GitHub release with pre-built binaries
+```
+
+## Usage
+
+### Share a single file
+```bash
+yeet /path/to/file.zip
+```
+
+### Share a directory
+```bash
+yeet /path/to/directory
+```
+
+### Daemon mode (background)
+```bash
+yeet /workspace/data --daemon
+```
+
+### Check tunnel status
+```bash
+yeet --status
+```
+
+### Stop daemon
+```bash
+yeet --kill
+```
+
+## Screenshots
 
 ```
-╦ ╦ ╔═╗ ╔═╗ ╔╦╗   ╔═╗ ╦ ╦
-╚═╝ ║╣  ║╣   ║    ╚═╗ ╠═╣
-╩   ╚═╝ ╚═╝  ╩  ╔ ╚═╝ ╩ ╩
-
-    Y  E  E  T  .  S  H
-   ━━━━━━━━━━━━━━━━━━━━
-    WARP SPEED FILE XFER
+  ██╗   ██╗███████╗███████╗████████╗   v0.1.0
+  ╚██╗ ██╔╝██╔════╝██╔════╝╚══██╔══╝
+   ╚████╔╝ █████╗  █████╗     ██║
+    ╚██╔╝  ██╔══╝  ██╔══╝     ██║
+     ██║   ███████╗███████╗   ██║
+     ╚═╝   ╚══════╝╚══════╝   ╚═╝
+>> yeet stuff across the internet
 ```
 
-## ✨ Features
+## Tech Stack
 
-- 🎨 **Retro-futuristic TUI** with neon cyberpunk aesthetics
-- ⚡ **Lightning fast** - Faster than SCP/SFTP (no SSH overhead)
-- 🌐 **Cloudflare tunnels** - Works behind NAT/firewalls
-- 🔒 **Secure** - Only shares the file you specify
-- 📦 **Any file size** - Transfer gigabytes without limits
-- 🦀 **Rust powered** - Single binary, zero dependencies
+- **Rust** - Blazing fast and memory safe
+- **Ratatui** - Terminal UI framework
+- **Axum** - Web server
+- **Cloudflare Tunnels** - Instant public URLs
+- **Dioxus** - Web UI components (ready for integration)
 
-## 🚀 Quick Start
+## Development
 
 ```bash
-# Yeet a file
-yeet myfile.zip
-
-# That's it! You'll get a public URL instantly
-```
-
-## 📦 Installation
-
-### macOS / Linux
-
-**Curl installer** (easiest):
-```bash
-curl -sSL https://yeet.sh/install | bash
-```
-
-**Homebrew**:
-```bash
-brew install yeet-sh
-```
-
-**From source**:
-```bash
-cargo install yeet-sh
-```
-
-### Requirements
-
-- `cloudflared` (auto-installed by our installer, or: `brew install cloudflared`)
-- `python3` (usually pre-installed)
-
-## 🎯 Usage
-
-```bash
-# Basic usage
-yeet path/to/file.zip
-
-# Custom port
-yeet --port 9000 bigfile.tar.gz
-
-# Help
-yeet --help
-```
-
-## 🎨 Why yeet.sh?
-
-**Traditional file transfer sucks:**
-- ❌ SCP is slow (SSH encryption overhead)
-- ❌ SFTP requires SSH setup
-- ❌ Email has size limits
-- ❌ Dropbox/Drive requires uploading first
-- ❌ WeTransfer has ads and limits
-
-**yeet.sh is different:**
-- ✅ One command to share
-- ✅ Instant public URL
-- ✅ Works anywhere (NAT/firewall friendly)
-- ✅ No size limits
-- ✅ Beautiful retro UI
-- ✅ Free forever
-
-## 🏗️ How It Works
-
-1. Creates isolated temp directory with your file
-2. Starts local HTTP server
-3. Opens Cloudflare tunnel
-4. Gives you a public HTTPS URL
-5. Auto-cleanup on exit
-
-## 🛠️ Development
-
-```bash
-# Clone
-git clone https://github.com/yourusername/yeet.sh
-cd yeet.sh
+# Clone repo
+git clone https://github.com/akash-otonomy/yeet.git
+cd yeet
 
 # Build
 cargo build --release
 
 # Run
-cargo run -- testfile.txt
+cargo run -- /tmp/test-file.txt
 ```
 
-## 🎮 Controls
+## License
 
-- `q` or `Esc` - Quit
-- `Ctrl+C` - Quit
+MIT
 
-## 🤝 Contributing
+## Contributing
 
-PRs welcome! Let's make file transfer cool again.
-
-## 📝 License
-
-MIT License - YEET freely!
-
-## 🌟 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=yourusername/yeet.sh&type=Date)](https://star-history.com/#yourusername/yeet.sh&Date)
+Contributions welcome! This is a fun side project - feel free to open issues or PRs.
 
 ---
 
-**Made with 🦀 Rust + ❤️ by developers who are tired of slow file transfers**
-
-*YEET YOUR FILES. YEET YOUR PROBLEMS. YEET INTO THE FUTURE.*
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
