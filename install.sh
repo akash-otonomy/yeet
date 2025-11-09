@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 
 echo "🚀 Installing YEET v${VERSION}..."
 
@@ -31,9 +31,11 @@ case "$OS" in
         case "$ARCH" in
             x86_64)
                 TARGET="x86_64-apple-darwin"
+                CLOUDFLARED_ARCH="amd64"
                 ;;
             arm64)
                 TARGET="aarch64-apple-darwin"
+                CLOUDFLARED_ARCH="arm64"
                 ;;
             *)
                 echo "❌ Unsupported architecture: $ARCH"
@@ -41,7 +43,6 @@ case "$OS" in
                 ;;
         esac
         CLOUDFLARED_OS="darwin"
-        CLOUDFLARED_ARCH="amd64"  # Cloudflare only provides amd64 for macOS (works with Rosetta)
         ;;
     *)
         echo "❌ Unsupported OS: $OS"
@@ -84,15 +85,34 @@ if command -v cloudflared &> /dev/null; then
     echo "✅ cloudflared already installed"
 else
     echo "⬇️  Installing cloudflared..."
-    CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CLOUDFLARED_OS}-${CLOUDFLARED_ARCH}"
-    
-    if command -v curl &> /dev/null; then
-        curl -fsSL "$CLOUDFLARED_URL" -o "$INSTALL_DIR/cloudflared"
+
+    if [ "$CLOUDFLARED_OS" = "darwin" ]; then
+        # macOS binaries are distributed as .tgz archives
+        CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CLOUDFLARED_OS}-${CLOUDFLARED_ARCH}.tgz"
+        TEMP_FILE="/tmp/cloudflared.tgz"
+
+        if command -v curl &> /dev/null; then
+            curl -fsSL "$CLOUDFLARED_URL" -o "$TEMP_FILE"
+        else
+            wget -q "$CLOUDFLARED_URL" -O "$TEMP_FILE"
+        fi
+
+        tar -xzf "$TEMP_FILE" -C "$INSTALL_DIR"
+        rm "$TEMP_FILE"
+        chmod +x "$INSTALL_DIR/cloudflared"
     else
-        wget -q "$CLOUDFLARED_URL" -O "$INSTALL_DIR/cloudflared"
+        # Linux binaries are distributed as plain executables
+        CLOUDFLARED_URL="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-${CLOUDFLARED_OS}-${CLOUDFLARED_ARCH}"
+
+        if command -v curl &> /dev/null; then
+            curl -fsSL "$CLOUDFLARED_URL" -o "$INSTALL_DIR/cloudflared"
+        else
+            wget -q "$CLOUDFLARED_URL" -O "$INSTALL_DIR/cloudflared"
+        fi
+
+        chmod +x "$INSTALL_DIR/cloudflared"
     fi
-    
-    chmod +x "$INSTALL_DIR/cloudflared"
+
     echo "✅ cloudflared installed"
 fi
 
