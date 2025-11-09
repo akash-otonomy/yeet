@@ -1177,13 +1177,37 @@ fn main() -> Result<()> {
     // Check for existing tunnel
     let daemon_exists = if let Some(state) = TunnelState::load() {
         if state.is_tunnel_alive() && state.port == cli.port {
-            println!("Found existing tunnel (age: {:.1}h)", state.age_hours());
-            println!("URL: {}", state.url);
-            println!("\nReusing tunnel... Starting TUI...");
-            println!("Press 'q' to exit TUI (tunnel stays alive)");
-            println!("Use 'yeet --kill' to stop the daemon");
-            thread::sleep(Duration::from_secs(2));
-            true
+            // Check if the file path matches
+            let requested_path = file.canonicalize().unwrap_or(file.clone());
+            let daemon_path = PathBuf::from(&state.file_path);
+
+            if requested_path == daemon_path {
+                // Same file/dir - reuse tunnel
+                println!("Found existing tunnel (age: {:.1}h)", state.age_hours());
+                println!("URL: {}", state.url);
+                println!("\nReusing tunnel... Starting TUI...");
+                println!("Press 'q' to exit TUI (tunnel stays alive)");
+                println!("Use 'yeet --kill' to stop the daemon");
+                thread::sleep(Duration::from_secs(2));
+                true
+            } else {
+                // Different file/dir - restart daemon
+                println!("🔄 Different file requested - restarting daemon");
+                println!("   Old: {}", state.file_path);
+                println!("   New: {}", requested_path.display());
+
+                // Kill old daemon
+                if let Err(e) = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(state.pid as i32),
+                    nix::sys::signal::Signal::SIGTERM
+                ) {
+                    eprintln!("⚠️  Failed to kill old daemon: {}", e);
+                }
+
+                TunnelState::delete();
+                thread::sleep(Duration::from_millis(500)); // Give time for cleanup
+                false
+            }
         } else {
             TunnelState::delete();
             false
