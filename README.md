@@ -1,5 +1,9 @@
 # YEET 🚀
 
+
+https://github.com/user-attachments/assets/e0678561-5559-4e8a-8dd4-44f363f26bf2
+
+
 > Yeet files across the internet at warp speed
 
 Zero-config file sharing via Cloudflare tunnels with a retro TUI and web dashboard.
