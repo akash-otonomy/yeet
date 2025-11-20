@@ -3,7 +3,7 @@ mod tui;
 mod web;
 mod shared;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode},
@@ -30,6 +30,54 @@ use tokio::runtime::Runtime;
 use axum::Router;
 use serde::{Serialize, Deserialize};
 use nix::unistd::{fork, ForkResult, setsid};
+use regex::Regex;
+use once_cell::sync::Lazy;
+use tracing::{info, debug, warn, error};
+
+// Compile regex pattern once for efficiency
+static CLOUDFLARE_URL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"https://[^\s]+\.trycloudflare\.com")
+        .expect("Failed to compile cloudflare URL regex")
+});
+
+/// Maximum file size for loading into memory (100 MB)
+const MAX_FILE_SIZE_MEMORY: u64 = 100 * 1024 * 1024;
+
+/// HTML escape helper to prevent XSS attacks
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+/// Validate that the requested path is within the allowed base directory
+/// Prevents path traversal attacks like /../../../etc/passwd
+fn validate_path_within_base(base: &PathBuf, requested: &PathBuf) -> Result<PathBuf> {
+    let canonical_base = base.canonicalize()
+        .context("Failed to canonicalize base path")?;
+    let canonical_requested = requested.canonicalize()
+        .or_else(|_| {
+            // If file doesn't exist yet, canonicalize the parent and append the filename
+            if let Some(parent) = requested.parent() {
+                if let Some(filename) = requested.file_name() {
+                    parent.canonicalize()
+                        .map(|p| p.join(filename))
+                } else {
+                    anyhow::bail!("Invalid path")
+                }
+            } else {
+                anyhow::bail!("Invalid path")
+            }
+        })?;
+
+    if !canonical_requested.starts_with(&canonical_base) {
+        anyhow::bail!("Path traversal attempt detected");
+    }
+
+    Ok(canonical_requested)
+}
 
 // Spawn a daemon process that runs server + cloudflared
 fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
@@ -43,22 +91,31 @@ fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
             // Child process - become daemon
 
             // Create new session (detach from terminal)
-            setsid().expect("Failed to create new session");
+            if let Err(e) = setsid() {
+                eprintln!("Failed to create new session: {}", e);
+                std::process::exit(1);
+            }
 
             // Redirect stdin/stdout/stderr to /dev/null
             use std::fs::OpenOptions;
-            let dev_null = OpenOptions::new()
+            let dev_null = match OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open("/dev/null")
-                .expect("Failed to open /dev/null");
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to open /dev/null: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
             use std::os::unix::io::AsRawFd;
             use nix::unistd::dup2;
             let null_fd = dev_null.as_raw_fd();
-            dup2(null_fd, 0).ok(); // stdin
-            dup2(null_fd, 1).ok(); // stdout
-            dup2(null_fd, 2).ok(); // stderr
+            let _ = dup2(null_fd, 0); // stdin
+            let _ = dup2(null_fd, 1); // stdout
+            let _ = dup2(null_fd, 2); // stderr
 
             // Run server and cloudflared
             run_daemon_server(file_path, port);
@@ -390,7 +447,13 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
     use std::process;
 
     let daemon_pid = process::id();
-    let rt = Runtime::new().expect("Failed to create runtime");
+    let rt = match Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Failed to create runtime: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     rt.block_on(async move {
         use axum::response::Response;
@@ -408,45 +471,101 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                     // Get path from URI
                     let req_path = req.uri().path();
 
-                    // Construct full path
+                    // Construct and validate path (prevent directory traversal)
                     let full_path = if req_path.is_empty() || req_path == "/" {
                         base_path.clone()
                     } else {
                         base_path.join(req_path.trim_start_matches('/'))
                     };
 
+                    // SECURITY: Validate path to prevent traversal attacks
+                    let safe_path = match validate_path_within_base(&base_path, &full_path) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            return Response::builder()
+                                .status(StatusCode::FORBIDDEN)
+                                .body(Body::from("Forbidden: Path traversal detected"))
+                                .unwrap_or_else(|_| Response::new(Body::from("Forbidden")));
+                        }
+                    };
+
                     // If it's a file, serve it
-                    if full_path.is_file() {
-                        match tokio::fs::read(&full_path).await {
-                            Ok(contents) => {
-                                return Response::builder()
-                                    .status(StatusCode::OK)
-                                    .header(header::CONTENT_TYPE, "application/octet-stream")
-                                    .header(header::CONTENT_DISPOSITION,
-                                        format!("attachment; filename=\"{}\"",
-                                            full_path.file_name().unwrap().to_string_lossy()))
-                                    .body(Body::from(contents))
-                                    .unwrap();
-                            }
+                    if safe_path.is_file() {
+                        // Get file metadata to check size
+                        let metadata = match tokio::fs::metadata(&safe_path).await {
+                            Ok(m) => m,
                             Err(_) => {
                                 return Response::builder()
                                     .status(StatusCode::NOT_FOUND)
                                     .body(Body::from("File not found"))
-                                    .unwrap();
+                                    .unwrap_or_else(|_| Response::new(Body::from("Not found")));
+                            }
+                        };
+
+                        let filename = safe_path.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "file".to_string());
+
+                        // For large files, use streaming; for small files, load into memory
+                        if metadata.len() > MAX_FILE_SIZE_MEMORY {
+                            // Stream large files
+                            use tokio::fs::File;
+                            use tokio_util::io::ReaderStream;
+
+                            match File::open(&safe_path).await {
+                                Ok(file) => {
+                                    let stream = ReaderStream::new(file);
+                                    let body = Body::from_stream(stream);
+
+                                    return Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                                        .header(header::CONTENT_DISPOSITION,
+                                            format!("attachment; filename=\"{}\"", filename))
+                                        .body(body)
+                                        .unwrap_or_else(|_| Response::new(Body::from("Error")));
+                                }
+                                Err(_) => {
+                                    return Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from("Failed to open file"))
+                                        .unwrap_or_else(|_| Response::new(Body::from("Error")));
+                                }
+                            }
+                        } else {
+                            // Load small files into memory
+                            match tokio::fs::read(&safe_path).await {
+                                Ok(contents) => {
+                                    return Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                                        .header(header::CONTENT_DISPOSITION,
+                                            format!("attachment; filename=\"{}\"", filename))
+                                        .body(Body::from(contents))
+                                        .unwrap_or_else(|_| Response::new(Body::from(contents)));
+                                }
+                                Err(_) => {
+                                    return Response::builder()
+                                        .status(StatusCode::NOT_FOUND)
+                                        .body(Body::from("File not found"))
+                                        .unwrap_or_else(|_| Response::new(Body::from("Not found")));
+                                }
                             }
                         }
                     }
 
                     // If not a directory, 404
-                    if !full_path.is_dir() {
+                    if !safe_path.is_dir() {
                         return Response::builder()
                             .status(StatusCode::NOT_FOUND)
                             .body(Body::from("Not found"))
-                            .unwrap();
+                            .unwrap_or_else(|_| Response::new(Body::from("Not found")));
                     }
 
-                    let path = full_path;
-                    let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let path = safe_path;
+                    let dir_name = path.file_name()
+                        .map(|n| html_escape(&n.to_string_lossy()))
+                        .unwrap_or_else(|| "directory".to_string());
                     let current_path = req_path.to_string();
                     let mut files = Vec::new();
 
@@ -476,9 +595,12 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                         } else {
                             format!("{}/{}", current_path.trim_end_matches('/'), name)
                         };
+                        // SECURITY: Escape all user-controlled data to prevent XSS
+                        let safe_name = html_escape(&name);
+                        let safe_path = html_escape(&link_path);
                         file_list.push_str(&format!(
                             r#"{{ name: '{}', path: '{}', size: '{}', sizeBytes: {}, icon: '{}', isFile: {} }},"#,
-                            name.replace("'", "\\'"), link_path.replace("'", "\\'"), size_str, size, icon, is_file
+                            safe_name, safe_path, size_str, size, icon, is_file
                         ));
                     }
 
@@ -694,7 +816,7 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                         .status(StatusCode::OK)
                         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                         .body(Body::from(html))
-                        .unwrap()
+                        .unwrap_or_else(|_| Response::new(Body::from(html)))
                 }
             };
 
@@ -705,7 +827,9 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                 .fallback(index_handler)
         } else {
             // Serve single file
-            let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
+            let filename = file_path.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "file".to_string());
             let serve_path = format!("/{}", filename);
             let file_path_clone = file_path.clone();
 
@@ -713,27 +837,75 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
             let serve_file = move || {
                 let path = file_path_clone.clone();
                 async move {
-                    match tokio::fs::read(&path).await {
-                        Ok(contents) => {
-                            Response::builder()
-                                .status(StatusCode::OK)
-                                .header(header::CONTENT_TYPE, "application/octet-stream")
-                                .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"",
-                                    path.file_name().unwrap().to_string_lossy()))
-                                .body(Body::from(contents))
-                                .unwrap()
-                        }
+                    // Check file metadata to determine if we should stream
+                    let metadata = match tokio::fs::metadata(&path).await {
+                        Ok(m) => m,
                         Err(_) => {
-                            Response::builder()
+                            return Response::builder()
                                 .status(StatusCode::NOT_FOUND)
                                 .body(Body::from("File not found"))
-                                .unwrap()
+                                .unwrap_or_else(|_| Response::new(Body::from("File not found")));
+                        }
+                    };
+
+                    let filename = path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+
+                    // Stream large files, load small files into memory
+                    if metadata.len() > MAX_FILE_SIZE_MEMORY {
+                        use tokio::fs::File;
+                        use tokio_util::io::ReaderStream;
+
+                        match File::open(&path).await {
+                            Ok(file) => {
+                                let stream = ReaderStream::new(file);
+                                let body = Body::from_stream(stream);
+
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                                    .header(header::CONTENT_DISPOSITION,
+                                        format!("attachment; filename=\"{}\"", filename))
+                                    .body(body)
+                                    .unwrap_or_else(|_| Response::new(Body::from("Error")))
+                            }
+                            Err(_) => {
+                                Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("Failed to open file"))
+                                    .unwrap_or_else(|_| Response::new(Body::from("Error")))
+                            }
+                        }
+                    } else {
+                        match tokio::fs::read(&path).await {
+                            Ok(contents) => {
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header(header::CONTENT_TYPE, "application/octet-stream")
+                                    .header(header::CONTENT_DISPOSITION,
+                                        format!("attachment; filename=\"{}\"", filename))
+                                    .body(Body::from(contents))
+                                    .unwrap_or_else(|_| Response::new(Body::from(contents)))
+                            }
+                            Err(_) => {
+                                Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Body::from("File not found"))
+                                    .unwrap_or_else(|_| Response::new(Body::from("File not found")))
+                            }
                         }
                     }
                 }
             };
 
+            // Health check endpoint
+            let health_check = || async {
+                "OK"
+            };
+
             Router::new()
+                .route("/health", axum::routing::get(health_check))
                 .route("/api/stats", axum::routing::get(api_stats_handler))
                 .route("/api/logs", axum::routing::get(api_logs_handler))
                 .route("/admin", axum::routing::get(admin_handler))
@@ -742,11 +914,21 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
         };
 
         let addr = format!("127.0.0.1:{}", port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.expect("Failed to bind");
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind to {}: {}", addr, e);
+                std::process::exit(1);
+            }
+        };
+
+        info!("HTTP server listening on {}", addr);
 
         // Start server in background
         let server_handle = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service()).await.expect("Server failed");
+            if let Err(e) = axum::serve(listener, app.into_make_service()).await {
+                error!("Server failed: {}", e);
+            }
         });
 
         // Wait a bit for server to start
@@ -763,12 +945,20 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
 async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32, is_dir: bool) {
     use std::io::{BufRead, BufReader};
 
-    let mut tunnel = Command::new("cloudflared")
+    debug!("Starting cloudflared tunnel for port {}", port);
+
+    let mut tunnel = match Command::new("cloudflared")
         .args(&["tunnel", "--url", &format!("http://localhost:{}", port)])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to start cloudflared");
+    {
+        Ok(t) => t,
+        Err(e) => {
+            error!("Failed to start cloudflared: {}", e);
+            return;
+        }
+    };
 
     if let Some(stderr) = tunnel.stderr.take() {
         let reader = BufReader::new(stderr);
@@ -777,32 +967,43 @@ async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32
         for line in reader.lines() {
             if let Ok(line) = line {
                 if !url_saved && line.contains("trycloudflare.com") {
-                    use regex::Regex;
-                    let re = Regex::new(r"https://[^\s]+\.trycloudflare\.com").unwrap();
-                    if let Some(mat) = re.find(&line) {
+                    // Use pre-compiled regex pattern
+                    if let Some(mat) = CLOUDFLARE_URL_RE.find(&line) {
                         let base_url = mat.as_str();
 
                         // For directories, use base URL; for files, append filename
                         let url = if is_dir {
                             base_url.to_string()
                         } else {
-                            let filename = file_path.file_name().unwrap().to_string_lossy().to_string();
+                            let filename = file_path.file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| "file".to_string());
                             format!("{}/{}", base_url, filename)
                         };
 
+                        info!("Tunnel URL extracted: {}", url);
+
                         // Save state
                         use std::time::{SystemTime, UNIX_EPOCH};
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+
                         let state = TunnelState {
                             url,
                             pid: daemon_pid,
                             port,
                             file_path: file_path.to_string_lossy().to_string(),
-                            created_at: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs(),
+                            created_at: timestamp,
                         };
-                        let _ = state.save();
+
+                        if let Err(e) = state.save() {
+                            error!("Failed to save tunnel state: {}", e);
+                        } else {
+                            debug!("Tunnel state saved successfully");
+                        }
+
                         url_saved = true;
                         // Continue reading stderr to keep pipe open
                     }
@@ -845,7 +1046,18 @@ impl TunnelState {
     fn save(&self) -> Result<()> {
         let path = Self::state_file();
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        fs::write(&path, content)
+            .context("Failed to write tunnel state file")?;
+
+        // SECURITY: Set restrictive permissions (owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(0o600);
+            fs::set_permissions(&path, perms)
+                .context("Failed to set state file permissions")?;
+        }
+
         Ok(())
     }
 
@@ -877,9 +1089,9 @@ impl TunnelState {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        (now - self.created_at) as f64 / 3600.0
+            .map(|d| d.as_secs())
+            .unwrap_or(self.created_at);  // Fallback to creation time if system time fails
+        (now.saturating_sub(self.created_at)) as f64 / 3600.0
     }
 }
 
@@ -997,11 +1209,15 @@ fn ui(f: &mut Frame, app: &App) {
     app.yeet_tui.render_logo(f, chunks[0]);
 
     // Info box
+    let file_name = app.file_path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| app.file_path.to_string_lossy().to_string());
+
     let mut info_lines = vec![
         Line::from(vec![
             Span::styled(if app.is_dir { "DIR: " } else { "FILE: " },
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw(app.file_path.file_name().unwrap().to_string_lossy()),
+            Span::raw(file_name),
         ]),
     ];
 
@@ -1178,7 +1394,7 @@ fn main() -> Result<()> {
     let daemon_exists = if let Some(state) = TunnelState::load() {
         if state.is_tunnel_alive() && state.port == cli.port {
             // Check if the file path matches
-            let requested_path = file.canonicalize().unwrap_or(file.clone());
+            let requested_path = file.canonicalize().unwrap_or_else(|_| file.clone());
             let daemon_path = PathBuf::from(&state.file_path);
 
             if requested_path == daemon_path {
@@ -1268,4 +1484,63 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.00 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.00 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.00 GB");
+        assert_eq!(format_bytes(1536), "1.50 KB");
+    }
+
+    #[test]
+    fn test_html_escape() {
+        assert_eq!(html_escape("normal text"), "normal text");
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+        assert_eq!(html_escape("&"), "&amp;");
+        assert_eq!(html_escape("'\""), "&#x27;&quot;");
+        assert_eq!(
+            html_escape("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn test_validate_path_within_base() {
+        use std::fs;
+        use std::env;
+
+        // Create a temporary test directory
+        let temp_dir = env::temp_dir().join("yeet_test");
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("test.txt"), "test").unwrap();
+
+        // Test valid path
+        let valid_path = temp_dir.join("test.txt");
+        let result = validate_path_within_base(&temp_dir, &valid_path);
+        assert!(result.is_ok());
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_cloudflare_url_regex() {
+        let test_line = "2024-01-01 12:00:00 INF https://test-abcd-1234.trycloudflare.com | tunnel";
+        let matches: Vec<_> = CLOUDFLARE_URL_RE.find_iter(test_line).collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].as_str(), "https://test-abcd-1234.trycloudflare.com");
+    }
+
+    #[test]
+    fn test_max_file_size_constant() {
+        assert_eq!(MAX_FILE_SIZE_MEMORY, 100 * 1024 * 1024);
+    }
 }
