@@ -1,8 +1,8 @@
 // Dioxus web UI components (not currently integrated into main server)
 // Ready for future use when we want to replace the Alpine.js admin dashboard
 
+use crate::shared::{RequestLog, ServerStats};
 use dioxus::prelude::*;
-use crate::shared::{ServerStats, RequestLog};
 
 /// Retro color palette (matching TUI theme)
 #[allow(dead_code)]
@@ -190,26 +190,28 @@ fn ProgressBar(percent: f64, color: String) -> Element {
 #[component]
 fn LiveLog() -> Element {
     // TODO: Fetch real logs from /api/logs endpoint
-    let _logs = use_signal(|| vec![
-        RequestLog {
-            timestamp: 1234567890,
-            method: "GET".to_string(),
-            path: "/cat.jpg".to_string(),
-            status: 200,
-            size_bytes: 2_400_000,
-            user_agent: "Chrome".to_string(),
-            ip: "192.168.1.5".to_string(),
-        },
-        RequestLog {
-            timestamp: 1234567888,
-            method: "GET".to_string(),
-            path: "/cat.jpg".to_string(),
-            status: 200,
-            size_bytes: 2_400_000,
-            user_agent: "Safari".to_string(),
-            ip: "10.0.1.23".to_string(),
-        },
-    ]);
+    let _logs = use_signal(|| {
+        vec![
+            RequestLog {
+                timestamp: 1234567890,
+                method: "GET".to_string(),
+                path: "/cat.jpg".to_string(),
+                status: 200,
+                size_bytes: 2_400_000,
+                user_agent: "Chrome".to_string(),
+                ip: "192.168.1.5".to_string(),
+            },
+            RequestLog {
+                timestamp: 1234567888,
+                method: "GET".to_string(),
+                path: "/cat.jpg".to_string(),
+                status: 200,
+                size_bytes: 2_400_000,
+                user_agent: "Safari".to_string(),
+                ip: "10.0.1.23".to_string(),
+            },
+        ]
+    });
 
     rsx! {
         div {

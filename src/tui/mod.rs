@@ -1,10 +1,7 @@
 pub mod theme;
 
 use crate::tui::theme::RetroTheme;
-use ratatui::{
-    prelude::*,
-    widgets::Paragraph,
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 use throbber_widgets_tui::ThrobberState;
 
 pub struct YeetTui {

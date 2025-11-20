@@ -26,6 +26,7 @@ pub struct RequestLog {
 
 /// File stats for directory mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)] // Part of API contract, will be used in future
 pub struct FileStats {
     pub name: String,
     pub requests: u64,

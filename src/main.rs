@@ -1,38 +1,37 @@
 // 🎮 Module declarations - TUI and Shared types
+mod shared;
 mod tui;
 mod web;
-mod shared;
 
 use anyhow::{Context, Result};
+use axum::Router;
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use nix::unistd::{fork, setsid, ForkResult};
+use once_cell::sync::Lazy;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
-    io,
-    path::PathBuf,
+    fs, io,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
-    fs,
 };
 use tokio::runtime::Runtime;
-use axum::Router;
-use serde::{Serialize, Deserialize};
-use nix::unistd::{fork, ForkResult, setsid};
-use regex::Regex;
-use once_cell::sync::Lazy;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info};
 
 // Compile regex pattern once for efficiency
 static CLOUDFLARE_URL_RE: Lazy<Regex> = Lazy::new(|| {
@@ -54,23 +53,31 @@ fn html_escape(s: &str) -> String {
 
 /// Validate that the requested path is within the allowed base directory
 /// Prevents path traversal attacks like /../../../etc/passwd
-fn validate_path_within_base(base: &PathBuf, requested: &PathBuf) -> Result<PathBuf> {
-    let canonical_base = base.canonicalize()
+fn validate_path_within_base(base: &Path, requested: &Path) -> Result<PathBuf> {
+    let canonical_base = base
+        .canonicalize()
         .context("Failed to canonicalize base path")?;
-    let canonical_requested = requested.canonicalize()
+    let canonical_requested = requested
+        .canonicalize()
         .or_else(|_| {
             // If file doesn't exist yet, canonicalize the parent and append the filename
             if let Some(parent) = requested.parent() {
                 if let Some(filename) = requested.file_name() {
-                    parent.canonicalize()
-                        .map(|p| p.join(filename))
+                    parent.canonicalize().map(|p| p.join(filename))
                 } else {
-                    anyhow::bail!("Invalid path")
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Invalid path",
+                    ))
                 }
             } else {
-                anyhow::bail!("Invalid path")
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid path",
+                ))
             }
-        })?;
+        })
+        .context("Failed to canonicalize requested path")?;
 
     if !canonical_requested.starts_with(&canonical_base) {
         anyhow::bail!("Path traversal attempt detected");
@@ -98,11 +105,7 @@ fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
 
             // Redirect stdin/stdout/stderr to /dev/null
             use std::fs::OpenOptions;
-            let dev_null = match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/null")
-            {
+            let dev_null = match OpenOptions::new().read(true).write(true).open("/dev/null") {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("Failed to open /dev/null: {}", e);
@@ -110,8 +113,8 @@ fn spawn_daemon(file_path: PathBuf, port: u16) -> Result<u32> {
                 }
             };
 
-            use std::os::unix::io::AsRawFd;
             use nix::unistd::dup2;
+            use std::os::unix::io::AsRawFd;
             let null_fd = dev_null.as_raw_fd();
             let _ = dup2(null_fd, 0); // stdin
             let _ = dup2(null_fd, 1); // stdout
@@ -536,13 +539,17 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                             // Load small files into memory
                             match tokio::fs::read(&safe_path).await {
                                 Ok(contents) => {
+                                    let body = Body::from(contents);
                                     return Response::builder()
                                         .status(StatusCode::OK)
                                         .header(header::CONTENT_TYPE, "application/octet-stream")
                                         .header(header::CONTENT_DISPOSITION,
                                             format!("attachment; filename=\"{}\"", filename))
-                                        .body(Body::from(contents))
-                                        .unwrap_or_else(|_| Response::new(Body::from(contents)));
+                                        .body(body)
+                                        .unwrap_or_else(|e| {
+                                            error!("Failed to build response: {}", e);
+                                            Response::new(Body::from("Internal Server Error"))
+                                        });
                                 }
                                 Err(_) => {
                                     return Response::builder()
@@ -812,11 +819,15 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
 </body>
 </html>"#, dir_name, dir_name, file_list);
 
+                    let body = Body::from(html);
                     Response::builder()
                         .status(StatusCode::OK)
                         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                        .body(Body::from(html))
-                        .unwrap_or_else(|_| Response::new(Body::from(html)))
+                        .body(body)
+                        .unwrap_or_else(|e| {
+                            error!("Failed to build response: {}", e);
+                            Response::new(Body::from("Internal Server Error"))
+                        })
                 }
             };
 
@@ -880,13 +891,17 @@ fn run_daemon_server(file_path: PathBuf, port: u16) {
                     } else {
                         match tokio::fs::read(&path).await {
                             Ok(contents) => {
+                                let body = Body::from(contents);
                                 Response::builder()
                                     .status(StatusCode::OK)
                                     .header(header::CONTENT_TYPE, "application/octet-stream")
                                     .header(header::CONTENT_DISPOSITION,
                                         format!("attachment; filename=\"{}\"", filename))
-                                    .body(Body::from(contents))
-                                    .unwrap_or_else(|_| Response::new(Body::from(contents)))
+                                    .body(body)
+                                    .unwrap_or_else(|e| {
+                                        error!("Failed to build response: {}", e);
+                                        Response::new(Body::from("Internal Server Error"))
+                                    })
                             }
                             Err(_) => {
                                 Response::builder()
@@ -948,7 +963,7 @@ async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32
     debug!("Starting cloudflared tunnel for port {}", port);
 
     let mut tunnel = match Command::new("cloudflared")
-        .args(&["tunnel", "--url", &format!("http://localhost:{}", port)])
+        .args(["tunnel", "--url", &format!("http://localhost:{}", port)])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -964,49 +979,48 @@ async fn start_cloudflared_daemon(file_path: PathBuf, port: u16, daemon_pid: u32
         let reader = BufReader::new(stderr);
         let mut url_saved = false;
 
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                if !url_saved && line.contains("trycloudflare.com") {
-                    // Use pre-compiled regex pattern
-                    if let Some(mat) = CLOUDFLARE_URL_RE.find(&line) {
-                        let base_url = mat.as_str();
+        for line in reader.lines().map_while(Result::ok) {
+            if !url_saved && line.contains("trycloudflare.com") {
+                // Use pre-compiled regex pattern
+                if let Some(mat) = CLOUDFLARE_URL_RE.find(&line) {
+                    let base_url = mat.as_str();
 
-                        // For directories, use base URL; for files, append filename
-                        let url = if is_dir {
-                            base_url.to_string()
-                        } else {
-                            let filename = file_path.file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "file".to_string());
-                            format!("{}/{}", base_url, filename)
-                        };
+                    // For directories, use base URL; for files, append filename
+                    let url = if is_dir {
+                        base_url.to_string()
+                    } else {
+                        let filename = file_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "file".to_string());
+                        format!("{}/{}", base_url, filename)
+                    };
 
-                        info!("Tunnel URL extracted: {}", url);
+                    info!("Tunnel URL extracted: {}", url);
 
-                        // Save state
-                        use std::time::{SystemTime, UNIX_EPOCH};
-                        let timestamp = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
+                    // Save state
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let timestamp = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
 
-                        let state = TunnelState {
-                            url,
-                            pid: daemon_pid,
-                            port,
-                            file_path: file_path.to_string_lossy().to_string(),
-                            created_at: timestamp,
-                        };
+                    let state = TunnelState {
+                        url,
+                        pid: daemon_pid,
+                        port,
+                        file_path: file_path.to_string_lossy().to_string(),
+                        created_at: timestamp,
+                    };
 
-                        if let Err(e) = state.save() {
-                            error!("Failed to save tunnel state: {}", e);
-                        } else {
-                            debug!("Tunnel state saved successfully");
-                        }
-
-                        url_saved = true;
-                        // Continue reading stderr to keep pipe open
+                    if let Err(e) = state.save() {
+                        error!("Failed to save tunnel state: {}", e);
+                    } else {
+                        debug!("Tunnel state saved successfully");
                     }
+
+                    url_saved = true;
+                    // Continue reading stderr to keep pipe open
                 }
             }
         }
@@ -1046,16 +1060,14 @@ impl TunnelState {
     fn save(&self) -> Result<()> {
         let path = Self::state_file();
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(&path, content)
-            .context("Failed to write tunnel state file")?;
+        fs::write(&path, content).context("Failed to write tunnel state file")?;
 
         // SECURITY: Set restrictive permissions (owner read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = fs::Permissions::from_mode(0o600);
-            fs::set_permissions(&path, perms)
-                .context("Failed to set state file permissions")?;
+            fs::set_permissions(&path, perms).context("Failed to set state file permissions")?;
         }
 
         Ok(())
@@ -1090,7 +1102,7 @@ impl TunnelState {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(self.created_at);  // Fallback to creation time if system time fails
+            .unwrap_or(self.created_at); // Fallback to creation time if system time fails
         (now.saturating_sub(self.created_at)) as f64 / 3600.0
     }
 }
@@ -1128,7 +1140,7 @@ struct App {
     frame_count: u32,
     daemon_pid: Option<u32>,
     daemon_age: Option<f64>,
-    yeet_tui: tui::YeetTui,  // 🎮 Retro TUI renderer
+    yeet_tui: tui::YeetTui, // 🎮 Retro TUI renderer
 }
 
 impl App {
@@ -1154,7 +1166,7 @@ impl App {
             frame_count: 0,
             daemon_pid,
             daemon_age,
-            yeet_tui: tui::YeetTui::new(),  // 🎮 Initialize retro TUI
+            yeet_tui: tui::YeetTui::new(), // 🎮 Initialize retro TUI
         })
     }
 
@@ -1170,9 +1182,9 @@ impl App {
 
     fn tick(&mut self) {
         self.frame_count = self.frame_count.wrapping_add(1);
-        self.yeet_tui.tick();  // 🎮 Tick retro animations
-        // Refresh state from daemon every few ticks
-        if self.frame_count % 30 == 0 {
+        self.yeet_tui.tick(); // 🎮 Tick retro animations
+                              // Refresh state from daemon every few ticks
+        if self.frame_count.is_multiple_of(30) {
             self.refresh_state();
         }
     }
@@ -1198,10 +1210,10 @@ fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),  // Logo
-            Constraint::Length(5),  // Info
-            Constraint::Min(6),     // URL panel
-            Constraint::Length(1),  // Footer
+            Constraint::Length(6), // Logo
+            Constraint::Length(5), // Info
+            Constraint::Min(6),    // URL panel
+            Constraint::Length(1), // Footer
         ])
         .split(size);
 
@@ -1209,33 +1221,52 @@ fn ui(f: &mut Frame, app: &App) {
     app.yeet_tui.render_logo(f, chunks[0]);
 
     // Info box
-    let file_name = app.file_path.file_name()
+    let file_name = app
+        .file_path
+        .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| app.file_path.to_string_lossy().to_string());
 
-    let mut info_lines = vec![
-        Line::from(vec![
-            Span::styled(if app.is_dir { "DIR: " } else { "FILE: " },
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-            Span::raw(file_name),
-        ]),
-    ];
+    let mut info_lines = vec![Line::from(vec![
+        Span::styled(
+            if app.is_dir { "DIR: " } else { "FILE: " },
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(file_name),
+    ])];
 
     if !app.is_dir {
         info_lines.push(Line::from(vec![
-            Span::styled("SIZE: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "SIZE: ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(app.format_size()),
         ]));
     }
 
     info_lines.push(Line::from(vec![
-        Span::styled("PORT: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "PORT: ",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("{}", app.port)),
     ]));
 
     if let Some(pid) = app.daemon_pid {
         info_lines.push(Line::from(vec![
-            Span::styled("DAEMON PID: ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "DAEMON PID: ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!("{}", pid), Style::default().fg(Color::Green)),
         ]));
     }
@@ -1257,14 +1288,24 @@ fn ui(f: &mut Frame, app: &App) {
         let mut url_lines = vec![
             Line::from(vec![
                 Span::styled(">> ", Style::default().fg(Color::Green)),
-                Span::styled(url, Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+                Span::styled(
+                    url,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
             ]),
             Line::from(""),
         ];
 
         if let Some(age) = app.daemon_age {
             url_lines.push(Line::from(vec![
-                Span::styled("UPTIME: ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "UPTIME: ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!("{:.1} hours", age)),
             ]));
             url_lines.push(Line::from(""));
@@ -1303,10 +1344,7 @@ fn ui(f: &mut Frame, app: &App) {
     f.render_widget(footer, chunks[3]);
 }
 
-fn run_app<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    mut app: App,
-) -> Result<()> {
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
@@ -1383,7 +1421,9 @@ fn main() -> Result<()> {
     }
 
     // Require file/directory for normal operation
-    let file = cli.file.ok_or_else(|| anyhow::anyhow!("File or directory path required (or use --status/--kill)"))?;
+    let file = cli.file.ok_or_else(|| {
+        anyhow::anyhow!("File or directory path required (or use --status/--kill)")
+    })?;
 
     // Validate path exists
     if !file.exists() {
@@ -1415,7 +1455,7 @@ fn main() -> Result<()> {
                 // Kill old daemon
                 if let Err(e) = nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(state.pid as i32),
-                    nix::sys::signal::Signal::SIGTERM
+                    nix::sys::signal::Signal::SIGTERM,
                 ) {
                     eprintln!("⚠️  Failed to kill old daemon: {}", e);
                 }
@@ -1514,8 +1554,8 @@ mod tests {
 
     #[test]
     fn test_validate_path_within_base() {
-        use std::fs;
         use std::env;
+        use std::fs;
 
         // Create a temporary test directory
         let temp_dir = env::temp_dir().join("yeet_test");
@@ -1536,7 +1576,10 @@ mod tests {
         let test_line = "2024-01-01 12:00:00 INF https://test-abcd-1234.trycloudflare.com | tunnel";
         let matches: Vec<_> = CLOUDFLARE_URL_RE.find_iter(test_line).collect();
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].as_str(), "https://test-abcd-1234.trycloudflare.com");
+        assert_eq!(
+            matches[0].as_str(),
+            "https://test-abcd-1234.trycloudflare.com"
+        );
     }
 
     #[test]
